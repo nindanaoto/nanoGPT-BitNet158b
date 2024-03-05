@@ -15,6 +15,74 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+# https://github.com/suito555/bitnet158b
+class BitLinear158b(nn.Linear):
+    def __init__(self, in_features, out_features, bias=False, bit_scale = 8):
+        super(BitLinear158b, self).__init__(in_features, out_features, bias)
+        self.bit_scale = bit_scale
+        self.Q_b = 2 ** (self.bit_scale - 1)
+        self.eps = 1e-8
+        
+    def quantize_activations(self, input_norm, abs_max_x_value):
+        scaled_x = torch.clamp(
+            input_norm * self.Q_b / (abs_max_x_value + self.eps), -self.Q_b + self.eps, self.Q_b - self.eps
+        )
+        return scaled_x
+    
+    def ternarize_weights(self,abs_mean_W_value):
+        scaled_W = self.weight / (abs_mean_W_value + self.eps)
+        quantize_weights = torch.sign(torch.clamp(scaled_W.round(), -1, 1))
+        #STE 
+        quantize_weights = (quantize_weights - self.weight).detach() + self.weight
+        return quantize_weights
+
+    def forward(self, input):
+        input_norm = F.layer_norm(input, (self.in_features,))
+        
+        abs_max_x_value = input_norm.abs().max() #gamma
+        quant_scaled_input = self.quantize_activations(input_norm,abs_max_x_value)
+
+        abs_mean_W_value = self.weight.abs().mean() #beta
+        ternarized_weights = self.ternarize_weights(abs_mean_W_value)
+
+        matmal_weight = F.linear(quant_scaled_input, ternarized_weights, self.bias)
+
+        beta_gamma = abs_mean_W_value * abs_max_x_value
+        output = matmal_weight * beta_gamma / self.Q_b
+        return output
+
+class BitLinear158bNIQ(nn.Linear):
+    def __init__(self, in_features, out_features, bias=False, bit_scale = 8):
+        super(BitLinear158bNIQ, self).__init__(in_features, out_features, bias)
+        self.bit_scale = bit_scale
+        self.Q_b = 2 ** (self.bit_scale - 1)
+        self.eps = 1e-8
+        
+    def quantize_activations(self, input_norm, abs_max_x_value):
+        scaled_x = torch.clamp(
+            input_norm * self.Q_b / (abs_max_x_value + self.eps), -self.Q_b + self.eps, self.Q_b - self.eps
+        )
+        return scaled_x
+    
+    def ternarize_weights(self,abs_mean_W_value):
+        scaled_W = self.weight / (abs_mean_W_value + self.eps)
+        quantize_weights = torch.sign(torch.clamp(scaled_W.round(), -1, 1))
+        #STE 
+        quantize_weights = (quantize_weights - self.weight).detach() + self.weight
+        return quantize_weights
+
+    def forward(self, input):
+        input_norm = F.layer_norm(input, (self.in_features,))
+
+        abs_mean_W_value = self.weight.abs().mean() #beta
+        ternarized_weights = self.ternarize_weights(abs_mean_W_value)
+
+        matmal_weight = F.linear(input_norm, ternarized_weights, self.bias)
+
+        beta_gamma = abs_mean_W_value
+        output = matmal_weight * beta_gamma / self.Q_b
+        return output
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -32,9 +100,9 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.c_attn = BitLinear158b(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj = BitLinear158b(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
@@ -79,9 +147,9 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_fc    = BitLinear158bNIQ(config.n_embd, 4 * config.n_embd, bias=config.bias, bit_scale = 16)
         self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj  = BitLinear158b(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -130,7 +198,7 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = BitLinear158b(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -161,6 +229,10 @@ class GPT(nn.Module):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, BitLinear158b):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
