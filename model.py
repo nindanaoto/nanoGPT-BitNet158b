@@ -24,14 +24,17 @@ class BitLinear158b(nn.Linear):
         self.eps = 1e-8
         
     def quantize_activations(self, input_norm, abs_max_x_value):
-        scaled_x = torch.clamp(
-            input_norm * self.Q_b / (abs_max_x_value + self.eps), -self.Q_b + self.eps, self.Q_b - self.eps
-        )
-        # # Inserting following comment outed line prevents the loss to be NaN if you use torch.compile with torch==2.0.0
-        # If you use torch==2.1.2
-        # if(torch.isnan(scaled_x).any()): 
-        #     print("Nan!")
-        return scaled_x
+        scaled_x = input_norm * self.Q_b / (abs_max_x_value + self.eps)
+        quantized_x = torch.round(torch.clamp(
+            scaled_x, -self.Q_b + self.eps, self.Q_b - self.eps
+        ))
+        # Inserting following comment outed line prevents the loss to be NaN if you use torch.compile with torch==2.0.0 or torch==2.2.1
+        # If you use torch==2.1.2, it will not be compiled.
+        if(torch.isnan(scaled_x).any()): 
+            print("Nan!")
+        #STE
+        quantized_x = (quantized_x - scaled_x).detach() + scaled_x
+        return quantized_x
     
     def ternarize_weights(self,abs_mean_W_value):
         scaled_W = self.weight / (abs_mean_W_value + self.eps)
