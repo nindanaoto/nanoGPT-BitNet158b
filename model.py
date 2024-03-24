@@ -14,81 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
-# https://github.com/suito555/bitnet158b
-class BitLinear158b(nn.Linear):
-    def __init__(self, in_features, out_features, bias=False, bit_scale = 8):
-        super(BitLinear158b, self).__init__(in_features, out_features, bias)
-        self.bit_scale = bit_scale
-        self.Q_b = 2 ** (self.bit_scale - 1)
-        self.eps = 1e-8
-        
-    def quantize_activations(self, input_norm, abs_max_x_value):
-        scaled_x = input_norm * self.Q_b / (abs_max_x_value + self.eps)
-        quantized_x = torch.round(torch.clamp(
-            scaled_x, -self.Q_b + self.eps, self.Q_b - self.eps
-        ))
-        # Inserting following comment outed line prevents the loss to be NaN if you use torch.compile with torch==2.0.0 or torch==2.2.1
-        # If you use torch==2.1.2, it will not be compiled.
-        if(torch.isnan(scaled_x).any()): 
-            print("Nan!")
-        #STE
-        quantized_x = (quantized_x - scaled_x).detach() + scaled_x
-        return quantized_x
-    
-    def ternarize_weights(self,abs_mean_W_value):
-        scaled_W = self.weight / (abs_mean_W_value + self.eps)
-        quantize_weights = torch.clamp(scaled_W.round(), -1, 1)
-        #STE 
-        quantize_weights = (quantize_weights - self.weight).detach() + self.weight
-        return quantize_weights
-
-    def forward(self, input):
-        input_norm = F.layer_norm(input, (self.in_features,))
-        
-        abs_max_x_value = input_norm.abs().max() #gamma
-        quant_scaled_input = self.quantize_activations(input_norm,abs_max_x_value)
-
-        abs_mean_W_value = self.weight.abs().mean() #beta
-        ternarized_weights = self.ternarize_weights(abs_mean_W_value)
-
-        matmal_weight = F.linear(quant_scaled_input, ternarized_weights, self.bias)
-
-        beta_gamma = abs_mean_W_value * abs_max_x_value
-        output = matmal_weight * beta_gamma / self.Q_b
-        return output
-
-# class BitLinear158bNIQ(nn.Linear):
-#     def __init__(self, in_features, out_features, bias=False, bit_scale = 8):
-#         super(BitLinear158bNIQ, self).__init__(in_features, out_features, bias)
-#         self.bit_scale = bit_scale
-#         self.Q_b = 2 ** (self.bit_scale - 1)
-#         self.eps = 1e-8
-        
-#     def quantize_activations(self, input_norm, abs_max_x_value):
-#         scaled_x = torch.clamp(
-#             input_norm * self.Q_b / (abs_max_x_value + self.eps), -self.Q_b + self.eps, self.Q_b - self.eps
-#         )
-#         return scaled_x
-    
-#     def ternarize_weights(self,abs_mean_W_value):
-#         scaled_W = self.weight / (abs_mean_W_value + self.eps)
-#         quantize_weights = torch.sign(torch.clamp(scaled_W.round(), -1, 1))
-#         #STE 
-#         quantize_weights = (quantize_weights - self.weight).detach() + self.weight
-#         return quantize_weights
-
-#     def forward(self, input):
-#         input_norm = F.layer_norm(input, (self.in_features,))
-
-#         abs_mean_W_value = self.weight.abs().mean() #beta
-#         ternarized_weights = self.ternarize_weights(abs_mean_W_value)
-
-#         matmal_weight = F.linear(input_norm, ternarized_weights, self.bias)
-
-#         beta_gamma = abs_mean_W_value
-#         output = matmal_weight * beta_gamma / self.Q_b
-#         return output
+from bitnet158b.BitNet158b import BitLinear158b
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -170,14 +96,12 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.attn(x)
+        x = x + self.mlp(x)
         return x
 
 @dataclass
